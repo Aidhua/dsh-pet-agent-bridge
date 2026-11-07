@@ -1,0 +1,15 @@
+{
+  "name": "dsh-pet-task-ctl",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "dsh-pet Agent bridge: chat-command task controller + shared long-term memory for DSH",
+  "license": "MIT",
+  "keywords": ["dsh", "dsh-pet", "deepseek-harness", "desktop-pet", "agent"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

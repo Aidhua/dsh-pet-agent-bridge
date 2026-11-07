@@ -1,0 +1,33 @@
+--- a/node_modules/dsh-pet/lib/index.js
++++ b/node_modules/dsh-pet/lib/index.js
+@@ -7993,6 +7993,30 @@
+ 			reason: "unknown-pet",
+ 			message: "没有这只桌宠：" + petId
+ 		};
++		// [PET-BRIDGE PATCH BEGIN] 桥接命令拦截：/task /memory /称呼 /bridge
++		// 未识别的命令原样落回原生流程；petTaskCtl 未加载时整块跳过。
++		try {
++			const bridgeGet = ctx.get;
++			const bridgeSvc = (typeof bridgeGet === "function" ? bridgeGet.call(ctx, "petTaskCtl", false) : void 0) ?? ctx.petTaskCtl;
++			if (bridgeSvc && typeof bridgeSvc.handleChatCommand === "function" && typeof text === "string" && text.startsWith("/")) {
++				const r = await bridgeSvc.handleChatCommand(petId, text);
++				if (r && r.handled === true) {
++					const reply = typeof r.reply === "string" ? r.reply : "";
++					const mem2 = await readMemory();
++					const bucket2 = mem2[found.entry] && typeof mem2[found.entry] === "object" && !Array.isArray(mem2[found.entry]) ? mem2[found.entry] : mem2[found.entry] = {};
++					const entry2 = bucket2[petId] && Array.isArray(bucket2[petId].messages) ? bucket2[petId] : bucket2[petId] = { messages: [] };
++					const now2 = Date.now();
++					entry2.messages.push({ role: "user", content: text, ts: now2 });
++					entry2.messages.push({ role: "assistant", content: reply, ts: now2 });
++					await writeMemory(mem2);
++					if (reply !== "") state.writePet(petId, "say", { text: reply });
++					return { ok: true, text: reply };
++				}
++			}
++		} catch (e) {
++			log.warn?.("[dsh-pet] 桥接命令处理失败：" + (e instanceof Error ? e.message : String(e)));
++		}
++		// [PET-BRIDGE PATCH END]
+ 		const rounds = memoryRounds(found.conf);
+ 		const pool = found.conf.chatImageEnabled === true ? limitPool(readMemePool(found.conf.memes, memeDirsFor(found.entry)), Number(found.conf.chatImageLimit)) : [];
+ 		const actions = found.conf.chatAnimationEnabled === true ? chatActionNames(found.conf.animations) : [];

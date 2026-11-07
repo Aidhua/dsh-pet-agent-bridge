@@ -1,0 +1,6 @@
+# M1 dev-only bundle patch: mount the Agent Task Controller into the host ctx tree.
+# Mirrors dsh-pet's cordis.patch.yml format (insert entry with globally unique id).
+# Entry id MUST differ from 'dsh-pet' so both bundles coexist in the petlab profile.
+- insert:
+    - id: dsh-pet-task-ctl
+      name: 'dsh-pet-task-ctl'

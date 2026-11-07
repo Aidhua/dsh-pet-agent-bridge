@@ -1,0 +1,19 @@
+# never publish secrets / local state
+.credentials.yaml
+*.log
+current-token.txt
+pet-memory.json
+host-*.log
+
+# runtime artifacts
+node_modules/
+results/
+workspaces/
+*.orig-backup
+*.tmp
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
