@@ -1082,6 +1082,9 @@ function apply(ctx) {
 				const raw = req?.url ?? "/";
 				const q = raw.indexOf("?");
 				const pathname = q < 0 ? raw : raw.slice(0, q);
+				// 诊断：把经过门房的每个请求都记一行（含非 /chat 的），出问题时能看出消息到底走了哪条路
+				const noisy = method === "GET" && pathname.endsWith("/state");
+				if (pathname.startsWith(PET_ROUTE_PREFIX) && !noisy) log(`door hit ${method} ${pathname}`);
 				isChatPost = method === "POST" && pathname === `${PET_ROUTE_PREFIX}/chat`;
 				if (!isChatPost) return original(req, res);
 
@@ -1094,6 +1097,7 @@ function apply(ctx) {
 					return undefined;
 				}
 				const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
+				log(`door body text=${JSON.stringify(text.slice(0, 40))} pet=${parsed?.petId ?? ""}`);
 				// 不是命令：连请求体一起还给原生流程，宠物聊天照旧
 				if (!text.startsWith("/")) return original(replayRequest(req, buf), res);
 
