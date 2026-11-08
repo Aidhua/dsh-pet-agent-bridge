@@ -113,8 +113,11 @@ def main():
 
     # 0. 上游未被改动
     if os.path.exists(DSH_PET_LIB):
-        h = hashlib.sha256(open(DSH_PET_LIB, "rb").read()).hexdigest()
-        check("dsh-pet 未被修改（哈希=0.4.5 基线）", h == BASELINE_SHA, h)
+        raw = open(DSH_PET_LIB, "rb").read()
+        h = hashlib.sha256(raw).hexdigest()
+        patched = b"[PET-BRIDGE PATCH BEGIN]" in raw
+        # 0.4.x 起由插件自动打补丁：打上才是正常状态；基线哈希也算通过（未启动过）
+        check("dsh-pet 补丁状态正确（已打补丁或保持基线）", patched or h == BASELINE_SHA, f"patched={patched} sha={h[:12]}")
     else:
         print("  SKIP  dsh-pet 路径不存在:", DSH_PET_LIB)
 
