@@ -78,7 +78,7 @@ const MAX_OWNER_CHARS = 32;
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
 const name = PLUGIN_ID;
-const inject = ["sessionController", "agents"];
+const inject = ["webServer"];
 
 function log(msg) {
 	console.log(`[${PLUGIN_ID}] ${msg}`);
@@ -138,9 +138,16 @@ function sanitizeIdFragment(raw) {
 }
 
 function safeService(ctx, id) {
+	// ctx.get(name, false) = 软取：服务不存在返回 undefined 而不是抛错。
+	// 早先写成 ctx.get(id)（required 语义）会让整个 try 落到 catch，连属性回落都走不到。
 	try {
-		const viaGet = typeof ctx?.get === "function" ? ctx.get(id) : undefined;
-		return viaGet ?? ctx?.[id] ?? undefined;
+		const viaGet = typeof ctx?.get === "function" ? ctx.get.call(ctx, id, false) : undefined;
+		if (viaGet !== undefined && viaGet !== null) return viaGet;
+	} catch {
+		/* 宿主 ctx 可能有严格的 getter，落到属性回落 */
+	}
+	try {
+		return ctx?.[id] ?? undefined;
 	} catch {
 		return undefined;
 	}
@@ -498,7 +505,7 @@ function apply(ctx) {
 	function findQueuedItemId(task) {
 		if (task.sessionId === undefined) return undefined;
 		try {
-			const agent = ctx.agents?.get?.(task.sessionId);
+			const agent = safeService(ctx, "agents")?.get?.(task.sessionId);
 			if (agent === undefined || agent === null) return undefined;
 			const inbox = agent.inbox;
 			if (inbox === undefined || inbox === null) return undefined;
@@ -518,7 +525,7 @@ function apply(ctx) {
 		const itemId = findQueuedItemId(task);
 		if (itemId === undefined) return false;
 		try {
-			ctx.sessionController.updateQueue({
+			safeService(ctx, "sessionController").updateQueue({
 				sessionId: task.sessionId,
 				itemId,
 				action: { kind: "remove" },
@@ -541,7 +548,11 @@ function apply(ctx) {
 
 	function cancelLiveTurn(task, cause) {
 		if (TERMINAL.has(task.state)) return;
-		const controller = ctx.sessionController;
+		const controller = safeService(ctx, "sessionController");
+		if (controller === undefined) {
+			finish(task, "failed", { cause, cancelError: "session-controller-unavailable" });
+			return;
+		}
 		try {
 			const receipt = controller.cancel({ sessionId: task.sessionId });
 			task.cancelling = true;
@@ -618,7 +629,11 @@ function apply(ctx) {
 	// ---- task submission core (shared by file entry and chat commands) -------
 	function startTask(task, text, opts = {}) {
 		tasks.set(task.id, task);
-		const controller = ctx.sessionController;
+		const controller = safeService(ctx, "sessionController");
+		if (controller === undefined) {
+			finish(task, "failed", { cause: "session-controller-unavailable" });
+			return;
+		}
 		const reuseSessionId = typeof opts.sessionId === "string" && opts.sessionId !== "" ? opts.sessionId : undefined;
 		const cwd = typeof opts.cwd === "string" && opts.cwd !== "" ? opts.cwd : defaultCwd;
 		const ensureSession = reuseSessionId !== undefined
@@ -656,7 +671,7 @@ function apply(ctx) {
 							log(`task ${task.id} prompt accepted by session ${task.sessionId}`);
 							task.promptSettled = true;
 							let agentStatus;
-							try { agentStatus = ctx.agents?.get?.(task.sessionId)?.status; } catch { /* ignore */ }
+							try { agentStatus = safeService(ctx, "agents")?.get?.(task.sessionId)?.status; } catch { /* ignore */ }
 							if (agentStatus === "running" && task.state === "accepted") {
 								task.execution = "queued";
 								transition(task, "queued", "prompt parked in inbox (another turn is active)");
@@ -1105,10 +1120,10 @@ function apply(ctx) {
 				doorRetryTimer = null;
 				return;
 			}
-			if (attempts === 60) {
+			if (attempts === 150) {
 				log("chat door still pending after 30s: pet route unavailable yet (native chat unaffected)");
 			}
-		}, 500);
+		}, 200);
 		doorRetryTimer.unref?.();
 	}
 
