@@ -67,14 +67,26 @@ cp -r src <你的 DSH_HOME>/profiles/<profile>/node_modules/dsh-pet-task-ctl
 # 3. 在 profile 的 package.json 里登记（bundles + dependencies 各加一条）
 #    "dsh-pet-task-ctl": "file:./node_modules/dsh-pet-task-ctl"
 
-# 4. 给 dsh-pet 打拦截补丁
-cd <你的 DSH_HOME>/profiles/<profile>/node_modules/dsh-pet
-git apply ../../../../dsh-pet-agent-bridge/patches/dsh-pet-0.4.5-chatwithpet.patch
+# 4. 打拦截补丁（脚本自带校验/备份/幂等，一条命令）
+cd <你的 DSH_HOME>/profiles/<profile>
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs apply
 
 # 5. 启动并验证
 dsh --profile <profile> --no-open --port 39190
 #    打开 http://127.0.0.1:39190/?token=... 在宠物聊天窗输入 /bridge
 ```
+
+### 补丁怎么管（不打无准备的仗）
+
+```bash
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs check    # 体检：位置/版本/是否已打/有无备份
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs apply    # 打补丁（已打过自动跳过）
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs revert   # 还原（优先用 .orig-backup）
+```
+
+脚本做三件安全事：**版本闸**（非 0.4.5 直接拒绝，除非 `--force`）、**字节校验**（不是原始产物就不动手）、**首次备份**（`.orig-backup`，永不覆盖）。手工方式仍可用：`git apply patches/dsh-pet-0.4.5-chatwithpet.patch`。
+
+> ⚠️ **升级 dsh-pet 会让补丁静默失效**：新版 `index.js` 覆盖后，插件仍在设置页亮着，但 `/task` 不再响应。升级后重新跑一次 `apply` 即可。
 
 > 完整逐步流程（含每一步该截什么图、写教程怎么引用）见 [`docs/手册-跑通流程.md`](docs/手册-跑通流程.md)。建议先在**隔离环境**（独立的 `DSH_HOME`）跑通，再接入日常环境。
 
@@ -92,8 +104,9 @@ DSH API 依赖（均经源码核实行号，见 `docs/F4-架构与关键实现.m
 
 ```
 src/                      桥接 bundle 源码（index.js 约 950 行，零第三方依赖）
-patches/                  对 dsh-pet 0.4.5 的拦截补丁
-scripts/                  测试助手与启动脚本
+src/scripts/              补丁工具（check/apply/revert，装成包后可用 dsh-pet-patch 调用）
+patches/                  对 dsh-pet 0.4.5 的拦截补丁（diff，供人工核对或 git apply）
+scripts/                  隔离环境启动脚本 + E2E 助手
 docs/                     F1-F7 交付文档 + 跑通手册 + 技术研究报告
 ```
 
