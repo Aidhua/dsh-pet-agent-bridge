@@ -1089,19 +1089,45 @@ function apply(ctx) {
 		return true;
 	}
 
-	if (!installChatDoor()) {
-		// dsh-pet 的路由可能比我们晚注册：静默重试，成功后停表
+	/**
+	 * 启动竞态与「上游重注册」都在这两段里收掉：
+	 * - 插件可能比 dsh-pet 先挂载（bundles 顺序不保证，插件多了加载更慢），此时路由还不存在；
+	 * - dsh-pet 改配置/热重载时会 dispose 旧路由再注册新的，把我们的门房一起冲掉。
+	 * 所以：重试不设上限（只在前 60 次后提示一次），另加看门狗每 3s 确认门房还在。
+	 */
+	function scheduleDoorRetry() {
+		if (doorRetryTimer !== null) return;
 		let attempts = 0;
 		doorRetryTimer = setInterval(() => {
 			attempts += 1;
-			if (installChatDoor() || attempts >= 60) {
+			if (installChatDoor()) {
 				clearInterval(doorRetryTimer);
 				doorRetryTimer = null;
-				if (door === null) log("chat door not installed: pet route unavailable (native chat unaffected; use the legacy patch)");
+				return;
+			}
+			if (attempts === 60) {
+				log("chat door still pending after 30s: pet route unavailable yet (native chat unaffected)");
 			}
 		}, 500);
 		doorRetryTimer.unref?.();
 	}
+
+	if (!installChatDoor()) scheduleDoorRetry();
+
+	const doorWatch = setInterval(() => {
+		if (door === null) {
+			// 还没装上就继续补
+			installChatDoor();
+			return;
+		}
+		const current = door.table.get(door.key);
+		const alive = current !== undefined && current?.handler?.[DOOR_FLAG] === true;
+		if (alive) return;
+		// 门房被覆盖了（上游重注册/其它插件改写）：重新装一次，仍然以当前 handler 为原生兜底
+		door = null;
+		if (installChatDoor()) log("chat door re-installed (upstream re-registered the pet route)");
+	}, 3000);
+	doorWatch.unref?.();
 
 	// ---- poll loop (TEST ENTRY) ----------------------------------------------
 	function looksLikeCancel(filePath) {
@@ -1144,6 +1170,7 @@ function apply(ctx) {
 		clearInterval(pollTimer);
 		if (memRetryTimer !== null) clearInterval(memRetryTimer);
 		if (doorRetryTimer !== null) clearInterval(doorRetryTimer);
+		clearInterval(doorWatch);
 		if (door !== null) {
 			try {
 				door.table.set(door.key, { ...door.route, handler: door.original });
