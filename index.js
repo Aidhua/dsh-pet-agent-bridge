@@ -49,6 +49,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 
 const PLUGIN_ID = "dsh-pet-task-ctl";
 const POLL_MS = 300;
@@ -1034,7 +1035,11 @@ function apply(ctx) {
 	 * bridge command so dsh-pet's native flow (including its own slash
 	 * commands) proceeds untouched.
 	 */
-	async function handleChatCommand(petId, rawText) {
+	/**
+	 * 命令路由的同步内核。聊天门房和 DSH 命令面板共用这一份，
+	 * 差别只在门房之后还要把往返写进宠物聊天记忆。
+	 */
+	function dispatchCommand(petId, rawText) {
 		try {
 			const text = typeof rawText === "string" ? rawText : "";
 			if (!text.startsWith("/")) return { handled: false };
@@ -1054,8 +1059,100 @@ function apply(ctx) {
 		}
 	}
 
+	async function handleChatCommand(petId, rawText) {
+		return dispatchCommand(petId, rawText);
+	}
+
 	ctx.provide("petTaskCtl", { handleChatCommand });
 	log("petTaskCtl service provided (chat command channel ready)");
+
+	// ---- 上游补丁自检 --------------------------------------------------------
+	/**
+	 * 桌面宠物窗口的输入走 dsh-pet 私有 IPC，不经过 HTTP。能同时覆盖管道与 HTTP 的
+	 * 唯一位置是 chatWithPet 内部那段补丁。安装时 postinstall 会预先打；这里只做体检，
+	 * 缺了就明确告诉用户怎么补，而不是让人对着「没反应」瞎猜。
+	 */
+	function reportUpstreamPatch() {
+		try {
+			const selfDir = path.dirname(fileURLToPath(import.meta.url));
+			const petLib = path.join(selfDir, "..", "dsh-pet", "lib", "index.js");
+			const text = fs.readFileSync(petLib, "utf8");
+			const patched = text.includes("[PET-BRIDGE PATCH BEGIN]");
+			log(patched
+				? "upstream patch: present（桌面窗口/页面两条入口都可用）"
+				: "upstream patch: MISSING —— 桌面宠物窗口里的命令不会生效；运行 node scripts/patch-dsh-pet.mjs apply 后重启");
+		} catch (err) {
+			log(`upstream patch check skipped: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+	reportUpstreamPatch();
+
+	// ---- DSH 命令入口 --------------------------------------------------------
+	/**
+	 * 桌面模式下宠物是独立窗口，输入走 dsh-pet 的私有 IPC，HTTP 门房与页面浮层都碰不到。
+	 * 所以真正"装完就能用"的入口是 DSH 自己的命令面板：主输入框打 /task、/bridge。
+	 * 网页模式同样可用（门房与命令面板都指向同一份 dispatchCommand）。
+	 */
+	const ACTIVE_PET_ID = "main";
+	const commandDisposers = [];
+	let commandsDone = false;
+	let cmdRetryTimer = null;
+
+	const COMMAND_SPECS = [
+		{ name: "task", desc: "交给桌宠的 DSH Agent 真实执行；也支持 status / list / cancel", hint: "<任务描述> | status | list | cancel", route: "task" },
+		{ name: "bridge", desc: "查看桌宠桥接的命令帮助", hint: "（无需参数）", route: "bridge" },
+		{ name: "memory", desc: "桌宠长期记忆：list / add <内容> / del <序号> / clear", hint: "list | add <内容> | del <序号> | clear", route: "memory" },
+		{ name: "owner", desc: "设置桌宠对你的称呼", hint: "<名字>", route: "称呼" },
+	];
+
+	function installCommands() {
+		if (commandsDone) return true;
+		const commands = safeService(ctx, "commands");
+		if (commands === undefined || typeof commands.register !== "function") return false;
+		try {
+			for (const spec of COMMAND_SPECS) {
+				const disposer = commands.register({
+					name: spec.name,
+					description: spec.desc,
+					input: { hint: spec.hint === "" ? " " : spec.hint },
+					handler: ({ rawInput }) => {
+						const rest = String(rawInput ?? "").trim();
+						const synthetic = `/${spec.route}${rest === "" ? "" : " " + rest}`;
+						const out = dispatchCommand(ACTIVE_PET_ID, synthetic);
+						if (out === undefined || out.handled !== true) return { kind: "error", text: "桥接内部路由失败" };
+						return { kind: "success", text: String(out.reply ?? "") };
+					},
+				});
+				if (typeof disposer === "function") commandDisposers.push(disposer);
+			}
+			commandsDone = true;
+			log("DSH commands registered (/task /bridge /memory /owner)");
+			// 自检：把宿主命令表列出来，确认注册真的进去了（也给排查留证据）
+			try {
+				const list = typeof commands.list === "function" ? commands.list() : undefined;
+				const names = Array.isArray(list) ? list.map((c) => (c && (c.name ?? c.id)) ?? "?").slice(0, 40) : null;
+				log(`commands registry: ${names === null ? "(no list api)" : JSON.stringify(names)}`);
+			} catch (err) {
+				log(`commands list failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			return true;
+		} catch (err) {
+			log(`DSH command registration failed: ${err instanceof Error ? err.message : String(err)}`);
+			return false;
+		}
+	}
+
+	if (!installCommands()) {
+		let tries = 0;
+		cmdRetryTimer = setInterval(() => {
+			tries += 1;
+			if (installCommands() || tries >= 600) {
+				clearInterval(cmdRetryTimer);
+				cmdRetryTimer = null;
+			}
+		}, 200);
+		cmdRetryTimer.unref?.();
+	}
 
 	// ---- chat door（零补丁接管聊天入口） -------------------------------------
 	/** 已安装的门房：用于 dispose 时还原原 handler。 */
@@ -1206,6 +1303,10 @@ function apply(ctx) {
 		clearInterval(pollTimer);
 		if (memRetryTimer !== null) clearInterval(memRetryTimer);
 		if (doorRetryTimer !== null) clearInterval(doorRetryTimer);
+		if (cmdRetryTimer !== null) clearInterval(cmdRetryTimer);
+		for (const d of commandDisposers.splice(0)) {
+			try { d(); } catch { /* ignore */ }
+		}
 		clearInterval(doorWatch);
 		if (door !== null) {
 			try {
