@@ -84,10 +84,47 @@ function log(msg) {
 	console.log(`[${PLUGIN_ID}] ${msg}`);
 }
 
+/**
+ * 原子写 JSON。
+ *
+ * Windows 上 `rename` 到「正被别的进程读着」的目标会抛 EACCES/EPERM，而这一步失败
+ * 会让结果文件停在旧状态——曾经出现过「任务已 cancelled，但 json 永远 running」。
+ * 所以这里退一步重试、必要时先删目标再放，最后兜底直写，并且无论成败都不留 .tmp 垃圾。
+ */
 function atomicWriteJson(file, value) {
+	const payload = JSON.stringify(value, null, 2);
 	const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
-	fs.renameSync(tmp, file);
+	fs.writeFileSync(tmp, payload, "utf8");
+	// 20ms 起步、最多 6 次：够覆盖杀毒/资源管理器短暂占用，又不至于卡住主循环。
+	const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+	for (let attempt = 0; attempt < 6; attempt += 1) {
+		try {
+			fs.renameSync(tmp, file);
+			return;
+		} catch {
+			/* fallthrough：先尝试清掉目标，再放一次 */
+		}
+		try {
+			fs.unlinkSync(file);
+		} catch {
+			/* 目标不存在也正常 */
+		}
+		try {
+			fs.renameSync(tmp, file);
+			return;
+		} catch {
+			Atomics.wait(sleepCell, 0, 0, 20 * (attempt + 1));
+		}
+	}
+	try {
+		fs.writeFileSync(file, payload, "utf8");
+	} finally {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			/* 已被 rename 掉则忽略 */
+		}
+	}
 }
 
 function nowIso() {

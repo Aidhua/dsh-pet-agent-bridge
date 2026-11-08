@@ -107,6 +107,25 @@ node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs revert   # 还原
 
 > 完整逐步流程（含每一步该截什么图、写教程怎么引用）见 [`docs/手册-跑通流程.md`](docs/手册-跑通流程.md)。建议先在**隔离环境**（独立的 `DSH_HOME`）跑通，再接入日常环境。
 
+## 已实测（桌面版 · 从零安装）
+
+在一台 Windows 11 机器上按用户视角走过一遍：`dsh plugin add` 装 dsh-pet@0.4.5 与桥接插件 → 重启桌面版 → 22 项断言全通过。
+
+| 检查项 | 结果 |
+|---|---|
+| dsh-pet 文件未被修改（sha256 = 0.4.5 原始产物） | ✅ |
+| `/bridge` `/task status` `/memory list` `/称呼` `/memory add` | ✅ |
+| 原生聊天不被干扰（非 `/` 开头走原流程） | ✅ |
+| `/task` 受理 → 建文件 → 内容正确 | ✅ |
+| `/task status` `/task list` 反映真实状态 | ✅ |
+| 连续指令（同会话改写文件） | ✅ |
+| `/task cancel` → 状态机到 `cancelled` | ✅ |
+| 记忆落盘（称呼 + 偏好） | ✅ |
+
+自测脚本：`python scripts/regression.py`（可用 `DSH_BRIDGE_HOST` / `DSH_BRIDGE_BASE` 指向你的实例）。
+
+> 桌面版请从桌面/开始菜单快捷方式启动（Electron shell）。直接 exec 二进制可能因缺少 shell 上下文静默退出——与插件无关。
+
 ## 兼容性
 
 | 组件 | 已验证版本 |

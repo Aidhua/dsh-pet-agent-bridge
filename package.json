@@ -1,12 +1,18 @@
 {
   "name": "dsh-pet-task-ctl",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "main": "index.js",
   "description": "dsh-pet Agent bridge: chat-command task controller + shared long-term memory for DSH (no upstream patch)",
   "license": "MIT",
-  "keywords": ["dsh", "dsh-pet", "deepseek-harness", "desktop-pet", "agent"],
+  "keywords": [
+    "dsh",
+    "dsh-pet",
+    "deepseek-harness",
+    "desktop-pet",
+    "agent"
+  ],
   "bin": {
     "dsh-pet-patch": "scripts/patch-dsh-pet.mjs"
   },
