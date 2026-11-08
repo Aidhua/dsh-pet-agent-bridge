@@ -50,6 +50,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const PLUGIN_ID = "dsh-pet-task-ctl";
 const POLL_MS = 300;
@@ -1077,10 +1078,19 @@ function apply(ctx) {
 			const selfDir = path.dirname(fileURLToPath(import.meta.url));
 			const petLib = path.join(selfDir, "..", "dsh-pet", "lib", "index.js");
 			const text = fs.readFileSync(petLib, "utf8");
-			const patched = text.includes("[PET-BRIDGE PATCH BEGIN]");
-			log(patched
-				? "upstream patch: present（桌面窗口/页面两条入口都可用）"
-				: "upstream patch: MISSING —— 桌面宠物窗口里的命令不会生效；运行 node scripts/patch-dsh-pet.mjs apply 后重启");
+			if (text.includes("[PET-BRIDGE PATCH BEGIN]")) {
+				log("upstream patch: present（桌面窗口/页面两条入口都可用）");
+				return;
+			}
+			// 还没打：就地补上，本次进程已加载旧代码，重启后生效
+			const cli = path.join(selfDir, "scripts", "patch-dsh-pet.mjs");
+			const res = spawnSync(process.execPath, [cli, "apply", "--target", petLib], { encoding: "utf8", timeout: 15000 });
+			const output = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").filter(Boolean).join(" | ");
+			if (res.status === 0) {
+				log(`upstream patch: applied（本次启动仍是旧代码，重启 DSH 一次后桌面窗口即可用命令）${output === "" ? "" : " / " + output}`);
+			} else {
+				log(`upstream patch: apply failed —— ${output}`);
+			}
 		} catch (err) {
 			log(`upstream patch check skipped: ${err instanceof Error ? err.message : String(err)}`);
 		}
