@@ -80,8 +80,18 @@ const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const name = PLUGIN_ID;
 const inject = ["webServer"];
 
+/** 日志落盘路径：apply 时才拿到 DSH_HOME，之前只有 stdout。 */
+let bridgeLogFile = null;
+
 function log(msg) {
-	console.log(`[${PLUGIN_ID}] ${msg}`);
+	const line = `[${PLUGIN_ID}] ${msg}`;
+	console.log(line);
+	if (bridgeLogFile === null) return;
+	try {
+		fs.appendFileSync(bridgeLogFile, `${new Date().toISOString()} ${msg}\n`, "utf8");
+	} catch {
+		/* 日志写不进去不能影响主流程 */
+	}
 }
 
 /**
@@ -271,6 +281,13 @@ function apply(ctx) {
 		? path.resolve(process.env.DSH_HOME.trim())
 		: path.join(os.homedir(), ".dsh");
 	const baseDir = path.join(homeRoot, PLUGIN_ID);
+	try {
+		fs.mkdirSync(baseDir, { recursive: true });
+		bridgeLogFile = path.join(baseDir, "bridge.log");
+	} catch {
+		bridgeLogFile = null;
+	}
+	log(`apply start (bundles 顺序较晚时门房会跟着晚，这里记时间点)`);
 	const reqDir = path.join(baseDir, "requests");
 	const resDir = path.join(baseDir, "results");
 	const defaultCwd = path.join(baseDir, "test-workspace");
@@ -1141,7 +1158,7 @@ function apply(ctx) {
 		// 门房被覆盖了（上游重注册/其它插件改写）：重新装一次，仍然以当前 handler 为原生兜底
 		door = null;
 		if (installChatDoor()) log("chat door re-installed (upstream re-registered the pet route)");
-	}, 3000);
+	}, 300);
 	doorWatch.unref?.();
 
 	// ---- poll loop (TEST ENTRY) ----------------------------------------------
