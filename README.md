@@ -34,7 +34,7 @@
 ```
 
 - **伴随 bundle 而非改上游构建产物**：复用同一 cordis ctx 与事件总线，加一行就装、删一行就卸。
-- **对 dsh-pet 的唯一改动是 6 行拦截块**（软查找 `petTaskCtl`，查不到就走原生流程——天然灰度开关）。补丁见 `patches/`。
+- **不改 dsh-pet 一行代码**：靠 webServer 的「最长前缀优先 + 更深前缀」合法接管 `POST /dsh-pet-7340/chat`，命令自己答、其余原样放行。旧的文件补丁降级为兜底方案，见 `patches/`。
 
 ## 命令
 
@@ -54,7 +54,7 @@
 
 ## 快速开始
 
-前置：已安装 DSH（0.2.2-rc.1 已测）与 dsh-pet 0.4.5。
+前置：已安装 DSH（0.2.2-rc.1 已测）与 dsh-pet 0.4.5。**不需要修改 dsh-pet 任何文件。**
 
 ```bash
 # 1. 取本仓库
@@ -67,26 +67,44 @@ cp -r src <你的 DSH_HOME>/profiles/<profile>/node_modules/dsh-pet-task-ctl
 # 3. 在 profile 的 package.json 里登记（bundles + dependencies 各加一条）
 #    "dsh-pet-task-ctl": "file:./node_modules/dsh-pet-task-ctl"
 
-# 4. 打拦截补丁（脚本自带校验/备份/幂等，一条命令）
-cd <你的 DSH_HOME>/profiles/<profile>
-node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs apply
-
-# 5. 启动并验证
+# 4. 启动并验证
 dsh --profile <profile> --no-open --port 39190
 #    打开 http://127.0.0.1:39190/?token=... 在宠物聊天窗输入 /bridge
 ```
 
-### 补丁怎么管（不打无准备的仗）
+打完重启就生效，dsh-pet 保持原样。
 
-```bash
-node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs check    # 体检：位置/版本/是否已打/有无备份
-node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs apply    # 打补丁（已打过自动跳过）
-node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs revert   # 还原（优先用 .orig-backup）
+### 它是怎么做到不改上游的
+
+DSH 的 webServer 在匹配路由时是**最长前缀优先**（`packages/host/webserver`：*Longest-prefix-wins*）。dsh-pet 把整个 `/dsh-pet-7340` 前缀抱走了，但我们可以合法注册一个**更深的前缀**，或者在它已注册的那条路由上换一层 handler：
+
+```
+POST /dsh-pet-7340/chat
+   ├─ 文本以 "/" 开头  → 本插件处理（/task /memory /称呼 /bridge）
+   └─ 其它（含图片）    → 原样交回 dsh-pet，连请求体都不碰
 ```
 
-脚本做三件安全事：**版本闸**（非 0.4.5 直接拒绝，除非 `--force`）、**字节校验**（不是原始产物就不动手）、**首次备份**（`.orig-backup`，永不覆盖）。手工方式仍可用：`git apply patches/dsh-pet-0.4.5-chatwithpet.patch`。
+启动日志里会有一行确认：
 
-> ⚠️ **升级 dsh-pet 会让补丁静默失效**：新版 `index.js` 覆盖后，插件仍在设置页亮着，但 `/task` 不再响应。升级后重新跑一次 `apply` 即可。
+```
+[dsh-pet-task-ctl] chat door installed (POST /dsh-pet-7340/chat → bridge, no upstream patch)
+```
+
+**没看到这行**说明当前 DSH 版本的路由表结构变了——此时功能不会静默失败：原生聊天完全不受影响，`/task` 暂不可用，可退回到下面的「兼容兜底」。
+
+### 兼容兜底（旧方案，通常用不到）
+
+若路由表不可达（DSH 大版本变更），可以退回改 dsh-pet 文件的老办法，脚本自带校验/备份/幂等：
+
+```bash
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs check    # 体检
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs apply    # 打补丁
+node node_modules/dsh-pet-task-ctl/scripts/patch-dsh-pet.mjs revert   # 还原
+```
+
+> ⚠️ 打完补丁后，升级 dsh-pet 会让它静默失效（文件被覆盖）；改用新方案则**升级不受影响**。
+
+> 完整逐步流程（含每一步该截什么图、写教程怎么引用）见 [`docs/手册-跑通流程.md`](docs/手册-跑通流程.md)。建议先在**隔离环境**（独立的 `DSH_HOME`）跑通，再接入日常环境。
 
 > 完整逐步流程（含每一步该截什么图、写教程怎么引用）见 [`docs/手册-跑通流程.md`](docs/手册-跑通流程.md)。建议先在**隔离环境**（独立的 `DSH_HOME`）跑通，再接入日常环境。
 
@@ -115,7 +133,7 @@ docs/                     F1-F7 交付文档 + 跑通手册 + 技术研究报告
 - 每个宠物同时只跑一个在途任务（串行，保证状态机清晰）。
 - 命令词为中文/英文混排（`/task` `/memory` `/称呼` `/owner` `/bridge`）。
 - 审批仍走 DSH 原生弹窗，桥接**不代答**——这是安全设计，不是缺陷。
-- 仅 `0.4.5` 的 dsh-pet 打过补丁验证；升级上游后需重新核对 `chatWithPet` 位置。
+- 默认走「路由接管」方案，不依赖任何 dsh-pet 文件改动；若某版 DSH 改了路由表结构，会退回文件补丁（脚本可一键 apply/revert）。
 
 ## 许可
 

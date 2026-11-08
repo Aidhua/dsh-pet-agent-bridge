@@ -48,6 +48,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 const PLUGIN_ID = "dsh-pet-task-ctl";
 const POLL_MS = 300;
@@ -108,8 +109,93 @@ function safeService(ctx, id) {
 	}
 }
 
-/** Extract plain text from an assistant/message event (defensive walk). */
-function textOfAssistantMessage(event) {
+// ---- chat door: 在不改上游文件的前提下接管 POST /dsh-pet-7340/chat ---------
+/**
+ * DSH 的 webServer 按「最长前缀优先」匹配路由，但同一 (kind, path) 重复注册会抛错，
+ * 且公开 API 没有请求中间件。所以这里只做一件事：把 dsh-pet 已注册的那条前缀路由的
+ * handler 换成"门房"——非命令请求原样交给原 handler（连请求体都不碰），以 "/" 开头的
+ * 命令就地应答。找不到路由表就安静放弃，原生聊天完全不受影响。
+ */
+const PET_ROUTE_PREFIX = "/dsh-pet-7340";
+/** 门房标记：避免热重载/重复 install 时把自己再包一层。 */
+const DOOR_FLAG = Symbol.for(`${PLUGIN_ID}.chatDoor`);
+const MAX_DOOR_BODY_BYTES = 256 * 1024;
+
+/** 读完请求体（带上限）；超限抛 { code: "body-too-large" }。 */
+function readRequestBody(req, limit) {
+	return new Promise((resolve, reject) => {
+		const chunks = [];
+		let size = 0;
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > limit) {
+				const err = new Error("request body too large");
+				err.code = "body-too-large";
+				reject(err);
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => resolve(Buffer.concat(chunks)));
+		req.on("error", reject);
+	});
+}
+
+function sendJson(res, status, obj) {
+	if (res.destroyed || res.writableEnded) return;
+	const body = JSON.stringify(obj);
+	res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
+	res.end(body);
+}
+
+/** 把已经读掉的请求体塞回一个新的可读流，交还原 handler（它只用到 url/method/headers/流）。 */
+function replayRequest(req, buf) {
+	const fake = Readable.from([buf]);
+	fake.method = req.method;
+	fake.url = req.url;
+	fake.headers = req.headers;
+	fake.httpVersion = req.httpVersion;
+	fake.socket = req.socket;
+	fake.destroyed = false;
+	return fake;
+}
+
+/** 从 `?pet=xxx` 取宠物 id；缺省回落到配置里第一只（这里用 main）。 */
+function petIdOfUrl(rawUrl) {
+	try {
+		const id = new URL(rawUrl ?? "/", "http://127.0.0.1").searchParams.get("pet");
+		return typeof id === "string" && id.trim() !== "" ? id.trim() : "main";
+	} catch {
+		return "main";
+	}
+}
+
+/** 找到 webServer 内部的路由表（公开 API 不暴露读取，这里只读一次候选属性）。 */
+function findRouteTable(web) {
+	if (web === undefined || web === null) return null;
+	for (const key of ["prefixes", "routes", "routeTable"]) {
+		const table = web[key];
+		if (table instanceof Map) return table;
+		if (table && typeof table.get === "function" && typeof table.set === "function") return table;
+	}
+	return null;
+}
+
+/** 从路由表里挑出 dsh-pet 的那条前缀路由。 */
+function findPetRoute(table, prefix) {
+	if (!table) return null;
+	for (const [key, route] of table) {
+		if (!route || typeof route !== "object") continue;
+		if (route.kind !== "prefix") continue;
+		const routePath = typeof route.path === "string" ? route.path : String(key);
+		if (routePath !== prefix) continue;
+		if (typeof route.handler !== "function") continue;
+		return { key, route, routePath };
+	}
+	return null;
+}
+
+/** Extract plain text from an assistant/message event (defensive walk). */function textOfAssistantMessage(event) {
 	const msg = event?.data?.message;
 	const parts = msg?.content;
 	if (!Array.isArray(parts)) return null;
@@ -902,6 +988,84 @@ function apply(ctx) {
 	ctx.provide("petTaskCtl", { handleChatCommand });
 	log("petTaskCtl service provided (chat command channel ready)");
 
+	// ---- chat door（零补丁接管聊天入口） -------------------------------------
+	/** 已安装的门房：用于 dispose 时还原原 handler。 */
+	let door = null;
+	let doorRetryTimer = null;
+
+	function installChatDoor() {
+		if (door !== null) return true;
+		const web = safeService(ctx, "webServer");
+		if (web === undefined) return false;
+		const table = findRouteTable(web);
+		const found = findPetRoute(table, PET_ROUTE_PREFIX);
+		if (found === null) return false;
+		const { key, route } = found;
+		const original = route.handler;
+		if (original[DOOR_FLAG] === true) {
+			// 已被本进程的另一个实例包过（热重载），直接接管所有权标记
+			return false;
+		}
+		const wrapped = async (req, res) => {
+			let isChatPost = false;
+			try {
+				const method = req?.method ?? "GET";
+				const raw = req?.url ?? "/";
+				const q = raw.indexOf("?");
+				const pathname = q < 0 ? raw : raw.slice(0, q);
+				isChatPost = method === "POST" && pathname === `${PET_ROUTE_PREFIX}/chat`;
+				if (!isChatPost) return original(req, res);
+
+				const buf = await readRequestBody(req, MAX_DOOR_BODY_BYTES);
+				let parsed = {};
+				try {
+					parsed = JSON.parse(buf.toString("utf8") || "{}") ?? {};
+				} catch {
+					sendJson(res, 400, { ok: false, reason: "invalid-json", message: "invalid JSON body" });
+					return undefined;
+				}
+				const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
+				// 不是命令：连请求体一起还给原生流程，宠物聊天照旧
+				if (!text.startsWith("/")) return original(replayRequest(req, buf), res);
+
+				const petId = petIdOfUrl(raw);
+				const outcome = await handleChatCommand(petId, text);
+				if (!outcome || outcome.handled !== true) return original(replayRequest(req, buf), res);
+				sendJson(res, 200, { ok: true, text: typeof outcome.reply === "string" ? outcome.reply : "" });
+				return undefined;
+			} catch (err) {
+				if (err && err.code === "body-too-large") {
+					sendJson(res, 413, { ok: false, reason: "payload-too-large", message: "request body too large" });
+					return undefined;
+				}
+				log(`chat door failed: ${err instanceof Error ? err.message : String(err)}`);
+				// 出错时尽量退回原生路径；请求体若已被读掉，只能给一句可读的错误
+				if (!isChatPost) return original(req, res);
+				sendJson(res, 500, { ok: false, reason: "internal-error", message: "dsh-pet task bridge: internal error" });
+				return undefined;
+			}
+		};
+		wrapped[DOOR_FLAG] = true;
+		table.set(key, { ...route, handler: wrapped });
+		door = { table, key, route, original };
+		log("chat door installed (POST /dsh-pet-7340/chat → bridge, no upstream patch)");
+		return true;
+	}
+
+	if (!installChatDoor()) {
+		// dsh-pet 的路由可能比我们晚注册：静默重试，成功后停表
+		let attempts = 0;
+		doorRetryTimer = setInterval(() => {
+			attempts += 1;
+			if (installChatDoor() || attempts >= 60) {
+				clearInterval(doorRetryTimer);
+				doorRetryTimer = null;
+				if (door === null) log("chat door not installed: pet route unavailable (native chat unaffected; use the legacy patch)");
+			}
+		}, 500);
+		doorRetryTimer.unref?.();
+	}
+
 	// ---- poll loop (TEST ENTRY) ----------------------------------------------
 	function looksLikeCancel(filePath) {
 		if (path.basename(filePath).startsWith("cancel")) return true;
@@ -942,6 +1106,13 @@ function apply(ctx) {
 	ctx.effect(() => () => {
 		clearInterval(pollTimer);
 		if (memRetryTimer !== null) clearInterval(memRetryTimer);
+		if (doorRetryTimer !== null) clearInterval(doorRetryTimer);
+		if (door !== null) {
+			try {
+				door.table.set(door.key, { ...door.route, handler: door.original });
+			} catch { /* table 可能已随宿主销毁 */ }
+			door = null;
+		}
 		for (const timer of timers.values()) clearTimeout(timer);
 		timers.clear();
 		activeBySession.clear();
