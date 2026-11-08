@@ -57,20 +57,19 @@
 前置：已安装 DSH（0.2.2-rc.1 已测）与 dsh-pet 0.4.5。**不需要修改 dsh-pet 任何文件。**
 
 ```bash
-# 1. 取本仓库
-git clone https://github.com/Aidhua/dsh-pet-agent-bridge.git
-cd dsh-pet-agent-bridge
+# 1. dsh-pet（已有可跳过）
+dsh plugin --profile desktop add dsh-pet@0.4.5
 
-# 2. 把 bundle 放进你的 DSH profile
-cp -r src <你的 DSH_HOME>/profiles/<profile>/node_modules/dsh-pet-task-ctl
+# 2. 桥接插件（直接从 GitHub 装）
+dsh plugin --profile desktop add github:Aidhua/dsh-pet-agent-bridge
 
-# 3. 在 profile 的 package.json 里登记（bundles + dependencies 各加一条）
-#    "dsh-pet-task-ctl": "file:./node_modules/dsh-pet-task-ctl"
+# 3. 确认 profile 的 bundles 里有它（多数情况插件命令会自动登记）
+#    <DSH_HOME>/profiles/desktop/package.json → dsh.profile.bundles: [... "dsh-pet-task-ctl"]
 
-# 4. 启动并验证
-dsh --profile <profile> --no-open --port 39190
-#    打开 http://127.0.0.1:39190/?token=... 在宠物聊天窗输入 /bridge
+# 4. 重启 DSH，在宠物聊天窗输入 /bridge
 ```
+
+装完重启即可，不需要改动 dsh-pet 的任何文件。
 
 打完重启就生效，dsh-pet 保持原样。
 
@@ -121,8 +120,9 @@ DSH API 依赖（均经源码核实行号，见 `docs/F4-架构与关键实现.m
 ## 目录
 
 ```
-src/                      桥接 bundle 源码（index.js 约 950 行，零第三方依赖）
-src/scripts/              补丁工具（check/apply/revert，装成包后可用 dsh-pet-patch 调用）
+index.js                  桥接 bundle（约 1.1k 行，零第三方依赖）
+cordis.patch.yml          本插件的 bundle 定义（DSH 加载入口）
+scripts/patch-dsh-pet.mjs 兼容兜底用的补丁工具（check/apply/revert）
 patches/                  对 dsh-pet 0.4.5 的拦截补丁（diff，供人工核对或 git apply）
 scripts/                  隔离环境启动脚本 + E2E 助手
 docs/                     F1-F7 交付文档 + 跑通手册 + 技术研究报告
