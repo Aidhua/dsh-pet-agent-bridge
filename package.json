@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "main": "index.js",
-  "description": "dsh-pet Agent bridge: chat-command task controller + shared long-term memory for DSH (no upstream patch)",
+  "description": "dsh-pet Agent bridge: chat-command task controller + shared long-term memory for DSH",
   "license": "MIT",
   "keywords": [
     "dsh",
